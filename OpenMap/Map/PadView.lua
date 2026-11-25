@@ -75,6 +75,7 @@ local WHEEL_EVERY = 0.12        -- seconds between the right stick's wheel notch
 local area = {}                 -- the quest's area: { frame, quest, map (drawn), hoverQ/M, focusQ/M, failed }
 local DrawArea                  -- (below: Apply redraws the area with it)
 local diag = { started = 0, setup = "not yet", shows = 0, why = "not tried yet" }   -- (/openmap padview)
+local RememberWaypoint          -- (below: the waypoint as last seen, for the left stick's)
 
 local function Clamp(x, lo, hi) return math.max(lo, math.min(hi, x)) end
 
@@ -941,6 +942,7 @@ local function Show()
 	pcall(place.Blizzard, 0)
 	view:Show()
 	dirty = true
+	pcall(RememberWaypoint)
 end
 
 local function Hide()
@@ -1015,13 +1017,47 @@ local function PutAgain()
 	local zone = chain[#chain]
 	if zone and zone ~= WORLD and (not C_Map.CanSetUserWaypointOnMap or C_Map.CanSetUserWaypointOnMap(zone)) then
 		local l, r, t, b = S.Rect(zone)
-		pcall(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(zone, (cu - l) / (r - l), (cv - t) / (b - t)))
+		-- (set as the map closes, Nav.lua's: set now, Blizzard's map open underneath would remake its pin as ours)
+		if mod.HoldGameWaypoint then
+			mod.HoldGameWaypoint(zone, (cu - l) / (r - l), (cv - t) / (b - t))
+		else
+			pcall(C_Map.SetUserWaypoint, UiMapPoint.CreateFromCoordinates(zone, (cu - l) / (r - l), (cv - t) / (b - t)))
+		end
 	end
+end
+
+local gameWp, shownWp           -- the game's waypoint as last seen, and the one this view showed: { mapID, x, y }
+local STICK_OFF = 0.03          -- Blizzard's GamepadTryPlaceWaypoint takes its waypoint off this near its cursor
+
+function RememberWaypoint()
+	gameWp = nil
+	if C_Map.HasUserWaypoint and C_Map.HasUserWaypoint() then
+		local point = C_Map.GetUserWaypoint()
+		local x, y
+		if point and point.position then x, y = ns.Safe.XY(point.position) end
+		if type(x) == "number" and type(y) == "number" and not ns.Safe.IsSecret(x) and not ns.Safe.IsSecret(y) then
+			gameWp = { point.uiMapID, x, y }
+		end
+	end
+	local m, x, y = mod.WaypointPoint()
+	shownWp = m and { m, x, y } or nil
 end
 
 -- the waypoint changed (whoever set it or took it off): its icon here
 local function OnWaypoint()
 	if built and mod.RefreshWaypoint then pcall(mod.RefreshWaypoint) end
+	pcall(RememberWaypoint)
+end
+
+-- whether this view's cursor is away from a waypoint on it (further than REACH)
+local function AwayFrom(wp)
+	if not (wp and lastX and S.Rect(wp[1])) then return false end
+	local wu, wv = mod.ToWorld(wp[1], wp[2], wp[3])
+	local W, H = S.Size()
+	local px = FitPx() * zoom
+	local cx, cy = Offset(lastX, lastY)
+	local dx, dy = (wu - u) * W * px - cx, (wv - v) * H * px - cy
+	return dx * dx + dy * dy > REACH * REACH
 end
 
 -- whether a game rule has map pins off: Blizzard's GamepadTryPlaceWaypoint does nothing then
@@ -1044,6 +1080,18 @@ local function PadPressed()
 	local ok2, stick = pcall(WaypointAt, mapID, x, y)
 	if ok2 and stick then
 		PutAgain()
+		if mod.RefreshWaypoint then pcall(mod.RefreshWaypoint) end
+	elseif ok2 and mod.DropHeldWaypoint and not (C_Map.HasUserWaypoint and C_Map.HasUserWaypoint()) then
+		-- the stick took the game's waypoint off, so none waits for the map to close. The game's stays at
+		-- Blizzard's cursor on its map underneath until then: pressed near that, away from the one shown here,
+		-- the stick meant a new one, here
+		local was = gameWp
+		if was and was[1] == mapID and math.abs(was[2] - x) <= STICK_OFF and math.abs(was[3] - y) <= STICK_OFF
+			and AwayFrom(shownWp) then
+			PutAgain()
+		else
+			mod.DropHeldWaypoint()
+		end
 		if mod.RefreshWaypoint then pcall(mod.RefreshWaypoint) end
 	end
 end
